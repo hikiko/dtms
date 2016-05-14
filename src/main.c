@@ -29,40 +29,57 @@
 
 static int parse_args(int argc, char **argv);
 static void print_help();
-static void check_device(char *device_path);
-static char* concatenate(char *mp_path, char *data_path);
+static int check_device(char *device_path);
 
-static int uid;
-static char *path;
+static int uid = -1;
+static char *player_path;
 static char *dev_path;
+
+#ifdef PREFIX
+static const char* player_arg = PREFIX "/share/dtms/dtms.mp3";
+#else
+static const char* player_arg = "data/dtms.mp3";
+#endif
 
 int main(int argc, char **argv)
 {
     time_t last_touch_time = 0;
     int fd;
 
-    if(parse_args(argc, argv))
+    if(parse_args(argc, argv) == -1)
 	return 1;
 
-    check_device(dev_path);
+    if(getuid() == 0 && uid == -1) {
+	fprintf(stderr, "It's a bad idea to run this program as root, either make it setuid-root, or use the -u option to specify an unprivileged user.\n");
+	return 1;
+    }
+
+    if(check_device(dev_path) == -1)
+	return 1;
 
     if((fd = open(dev_path, O_RDONLY | O_NONBLOCK)) == -1) {
 	fprintf(stderr, "Failed to open device: %s, error: %s\n", dev_path, strerror(errno));
 	return 1;
     }
 
+    if(uid == -1) {
+	uid = getuid();
+    }
+
     if(seteuid(uid) == -1) {
 	perror("Set uid failed");
-	uid = 0;
+	return 1;
     }
 
     if(!uid) {
-	const char *st = "/";
-	if(strncmp(path, st, 1) != 0) {
+	if(player_path[0] != '/') {
 	    fprintf(stderr, "If you run this program as root you should pass the absolute path to a valid mp3 player.\n");
 	    return 1;
 	}
     }
+
+    char *cmd = malloc(strlen(player_path) + 1 + strlen(player_arg) + 1);
+    sprintf(cmd, "%s %s", player_path, player_arg);
 
     while(1) {
 	fd_set read_set;
@@ -83,13 +100,16 @@ int main(int argc, char **argv)
 	    time_t now = time(0);
 	    while(read(fd, buf, sizeof buf) > 0);
 	    if (now - last_touch_time > 2) {
-		char *cmd = concatenate(path, "data/dtms.mp3");
 		system(cmd);
 		last_touch_time = now;
 	    }
 	}
     }
+
+    free(cmd);
     close(fd);
+
+    return 0;
 }
 
 static int parse_args(int argc, char **argv)
@@ -99,38 +119,47 @@ static int parse_args(int argc, char **argv)
 	    print_help();
 	    exit(0);
 	}
-	if((strcmp(argv[i], "-p") == 0)) {
-	    if(argv[i+1]) {
-		path = argv[i+1];
+
+	else if((strcmp(argv[i], "-p") == 0)) {
+	    if(argv[++i]) {
+		player_path = argv[i];
 	    }
 	    else {
 		fprintf(stderr, "Invalid path. Please give the absolute path to an mp3 player.\n");
-		exit(1);
+		return -1;
 	    }
 	}
 
-	if((strcmp(argv[i], "-u") == 0)) {
-	    if(argv[i+1]) {
-		struct passwd *passwd = getpwnam(argv[i+1]);
+	else if((strcmp(argv[i], "-u") == 0)) {
+	    if(argv[++i]) {
+		struct passwd *passwd = getpwnam(argv[i]);
 		if(!passwd) {
-		    fprintf(stderr, "Failed to get uid for: %s : %s.\n", argv[i+1], strerror(errno));
-		    exit(1);
+		    fprintf(stderr, "Failed to get uid for: %s : %s.\n", argv[i], strerror(errno));
+		    return -1;
 		}
 		uid = passwd->pw_uid;
+		if(uid == 0) {
+		    fprintf(stderr, "You should pass an unprivileged username.\n");
+		    return -1;
+		}
 	    }
 	    else {
-		fprintf(stderr, "Invalid username. Type -u `whoami`.\n");
-		exit(1);
+		fprintf(stderr, "Missing username.\n");
+		return -1;
 	    }
 	}
-	if((strcmp(argv[i], "-d") == 0)) {
-	    if(argv[i+1]) {
-		dev_path = argv[i+1];
+	else if((strcmp(argv[i], "-d") == 0)) {
+	    if(argv[++i]) {
+		dev_path = argv[i];
 	    }
 	    else {
 		fprintf(stderr, "Invalid device file.\n");
-		exit(1);
+		return -1;
 	    }
+	}
+	else {
+	    fprintf(stderr, "Unknown argument: %s\n", argv[i]);
+	    return -1;
 	}
     }
     return 0;
@@ -149,25 +178,16 @@ static void print_help()
     printf("./dtms -d /dev/usb/hiddev0 -u eleni -p /usr/bin/mpv\n");
 }
 
-static void check_device(char *device_path)
+static int check_device(char *device_path)
 {
     struct stat sb;
     if(stat(dev_path, &sb) == -1) {
 	perror("stat");
-	exit(0);
+	return -1;
     }
     if(((sb.st_mode & S_IFMT) != S_IFBLK) && ((sb.st_mode & S_IFMT) != S_IFCHR)) {
-	fprintf(stderr, "Invalid device file.\n");
-	exit(0);
+	fprintf(stderr, "%s is not a device file.\n", device_path);
+	return -1;
     }
-}
-
-static char *concatenate(char *mp_path, char *data_path)
-{
-    char *res = malloc(strlen(mp_path) + 1 + strlen(data_path) + 1);
-    strcpy(res, mp_path);
-    strcat(res, " ");
-    strcat(res, data_path);
-
-    return res;
+    return 0;
 }
